@@ -49,6 +49,7 @@ Implemented operations:
 - `GET /{warehouseId}` — retrieve a warehouse scoped by CompanyId and warehouse ID.
 - `PUT /{warehouseId}` — update name, code, and address.
 - `DELETE /{warehouseId}` — soft-deactivate by setting `IsActive=false`; returns `204 No Content`.
+- `PATCH /{warehouseId}/activate` — reactivate a warehouse by setting `IsActive=true`; returns `204 No Content`.
 
 Warehouse codes are checked for duplicates within the company, and the database's unique company/code index remains the final integrity constraint. DTO validation includes required name/code and maximum lengths. Names and codes are trimmed; blank addresses are normalized to null.
 
@@ -81,6 +82,45 @@ Product DTOs validate required fields and maximum lengths. CostPrice and Selling
 - Deactivation is idempotent: deactivating an already inactive product still succeeds.
 - The service checks for duplicate SKU before saving, but a concurrent request can still race. The database unique index is the final integrity constraint; translating a resulting unique-index `DbUpdateException` into `409 Conflict` remains to be implemented.
 - The update operation currently does not reject an inactive product; it can still be updated if its ID and CompanyId match.
+
+### Stock management
+
+Files:
+- `DTOs/Stock/StockInDto.cs`
+- `DTOs/Stock/StockOutDto.cs`
+- `DTOs/Stock/StockAdjustmentDto.cs`
+- `DTOs/Stock/StockResponseDto.cs`
+- `DTOs/Stock/StockMovementResponseDto.cs`
+- `Services/Interfaces/IStockService.cs`
+- `Services/Implementations/StockService.cs`
+- `Controllers/StockController.cs`
+
+The service is registered in `Program.cs`. No migration was required; ProductStock, StockMovement, their relationships, constraints, indexes, and ProductStock.RowVersion were already configured in the DbContext.
+
+Route base: `/api/companies/{companyId}/stock`
+
+Implemented operations:
+- `GET /` — list stock balances for the company, with optional `warehouseId` and `productId` filters.
+- `GET /movements` — list stock movements, with optional `warehouseId` and `productId` filters; newest movements are returned first.
+- `POST /in` — add stock.
+- `POST /out` — remove stock, rejecting an operation that would make the balance negative.
+- `POST /adjustment` — apply a signed quantity difference. Positive values increase stock; negative values decrease stock; zero is rejected.
+
+Stock updates and movement creation are performed in a database transaction. The service validates that the company is active and that the product and warehouse belong to the company and are active. ProductStock uses its configured row-version concurrency token. A concurrent first insert for a product/warehouse balance is protected by the unique index; the current implementation reports the handled concurrency/unique-key conflict rather than automatically retrying it. StockMovement.Quantity is always positive; MovementType records the direction. CreatedBy remains null until authentication and user identity are implemented.
+
+**Manual PowerShell API validation completed:**
+- Stock In 100 — balance became 100.
+- Stock In 50 more — same ProductStock row was updated to 150.
+- Stock Out 30 — balance became 120.
+- Stock Out 200 with insufficient balance — `409 Conflict`; negative stock was prevented.
+- Adjustment +20 — balance became 140.
+- Adjustment -10 — balance became 130.
+- Adjustment 0 — `409 Conflict`.
+- Stock movement query returned the expected five movements: StockIn 100, StockIn 50, StockOut 30, AdjustmentIn 20, AdjustmentOut 10. Movement quantities were positive.
+- Final tested balance for the temporary product `STOCK-TEST-001` in warehouse `WH-001` was 130.
+- Warehouse `WH-001` was reactivated through the new activate endpoint and verified with `IsActive=true`.
+
+These are manual API integration checks using PowerShell `Invoke-RestMethod`; automated unit/integration test coverage has not been confirmed.
 
 ## Tenant isolation note
 CompanyId is currently supplied explicitly in the route for early development and testing. It is a scoping parameter, not proof of identity or authorization. Production requests must derive the tenant from a trusted authenticated server-side context.
@@ -121,17 +161,18 @@ git remote -v
 - Company membership, roles, and permissions are not implemented.
 - Trusted server-side tenant resolution is pending.
 - Duplicate-SKU race-condition exception handling is pending.
-- Product stock, stock movement, and stock transfer services/controllers are not yet implemented.
-- Full transaction/concurrency handling for stock posting is pending.
+- Stock transfer service/controller and transfer API operations are not yet implemented.
+- Stock posting uses transactions and row-version concurrency, but automatic retry behavior for concurrency conflicts is not implemented.
+- Stock operations currently accept CompanyId from the route; trusted tenant resolution and authorization remain pending.
 - Automated unit/integration tests have not been confirmed.
 
 ## Next backend tasks
-1. Inspect `ProductStock.cs` and `StockMovement.cs`, including their relationships and constraints, before implementing inventory operations.
-2. Design Product Stock queries and stock-in/stock-out operations; do not expose arbitrary direct quantity editing.
-3. Implement inventory movements with atomic quantity updates, non-negative stock enforcement, and appropriate concurrency handling.
-4. Implement atomic multi-item stock transfer posting with appropriate transaction and concurrency handling.
-5. Design Authentication, Platform Admin, company membership, Main Moderator, roles, and permissions.
-6. Add validation, consistent error handling, automated tests, and authorization.
+1. Implement Stock Transfer DTOs, service interface/implementation, and controller using the existing StockTransfer/StockTransferItem models and DbContext constraints.
+2. Implement atomic multi-item transfer posting: validate source/destination warehouses and available balances; update both warehouse balances; create paired TransferOut/TransferIn movements; transition Draft to Posted exactly once.
+3. Add transfer cancellation rules (Draft only unless a deliberate reversal workflow is designed) and verify duplicate-post protection under repeated/concurrent requests.
+4. Create a second active warehouse and run manual API tests for single-item and multi-item transfers, insufficient source stock, same-warehouse rejection, and repeated posting.
+5. Design Authentication, Platform Admin, company membership, Main Moderator, roles, permissions, and trusted server-side tenant resolution.
+6. Add automated unit/integration tests, consistent error handling, and authorization.
 
 ## Next-session instruction
-Inspect the actual repository and working-tree state first. Review `ProductStock.cs`, `StockMovement.cs`, their DbContext configuration, and the existing service/controller patterns. Then design Product Stock and inventory movement operations around auditable stock movements, atomic updates, company scoping, and concurrency safety. Do not assume ProductStock CRUD should allow direct quantity edits.
+Inspect the actual repository and working-tree state first. Company, Warehouse, Product, and Stock Management have been implemented; Warehouse activation and the Stock In/Out/Adjustment/movement-query flows have passed manual PowerShell API checks. The latest Stock Management changes were built and pushed by the user. Next, implement Stock Transfer Management using the existing StockTransfer and StockTransferItem models and configured composite relationships. Do not create the second test warehouse until beginning transfer testing. Preserve atomic multi-item posting, positive movement quantities with direction represented by MovementType, non-negative stock, and protection against duplicate posting. Authentication, trusted tenant resolution, and automated tests remain outstanding.
