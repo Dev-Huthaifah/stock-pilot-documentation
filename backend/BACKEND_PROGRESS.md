@@ -122,6 +122,46 @@ Stock updates and movement creation are performed in a database transaction. The
 
 These are manual API integration checks using PowerShell `Invoke-RestMethod`; automated unit/integration test coverage has not been confirmed.
 
+### Stock Transfer Management
+
+Files:
+- `DTOs/StockTransfers/CreateStockTransferDto.cs`
+- `DTOs/StockTransfers/CreateStockTransferItemDto.cs`
+- `DTOs/StockTransfers/StockTransferItemResponseDto.cs`
+- `DTOs/StockTransfers/StockTransferResponseDto.cs`
+- `Services/Interfaces/IStockTransferService.cs`
+- `Services/Implementations/StockTransferService.cs`
+- `Controllers/StockTransfersController.cs`
+
+The service is registered in `Program.cs`. No migration was required because the StockTransfer and StockTransferItem entities, relationships, constraints, and indexes were already configured in the DbContext.
+
+Route base: `/api/companies/{companyId}/stock-transfers`
+
+Implemented operations:
+- `POST /` — create a multi-item transfer in Draft status without changing stock.
+- `GET /` — list transfers scoped by CompanyId.
+- `GET /{transferId}` — retrieve transfer details.
+- `POST /{transferId}/post` — post a transfer, update source and destination balances, create paired TransferOut/TransferIn movements, and set Posted status.
+- `POST /{transferId}/cancel` — cancel Draft transfers only.
+
+Transfer creation rejects identical source/destination warehouses, duplicate products within one transfer, invalid quantities, inactive companies/warehouses/products, and resources outside the company. Transfer numbers use GUID-based identifiers.
+
+Posting uses a database transaction and a conditional Draft-to-Posted update to prevent repeated posting. Stock movements use positive quantities; `MovementType` indicates direction. Each transfer item is linked to its paired TransferOut and TransferIn movements through `StockTransferItemId`. ProductStock row-version concurrency and database unique constraints protect stock integrity. A failed posting rolls back the transfer status and stock changes.
+
+**Manual PowerShell API validation completed:**
+- Created a transfer for 30 units — `201 Created`, status Draft.
+- Verified stock did not change before posting.
+- Posted the transfer — status Posted.
+- Source warehouse balance changed from 130 to 100.
+- Destination warehouse balance changed from 0 to 30.
+- Two linked movements were created: TransferOut (type 5) and TransferIn (type 6), both with positive quantities and the same StockTransferItemId.
+- Repeated posting returned `409 Conflict`.
+- Created an insufficient-stock transfer for 1000 units; posting was rejected.
+- Cancelled the failed Draft transfer — status Cancelled.
+- Verified final balances remained 100 in WH-001 and 30 in WH-002.
+
+These are manual PowerShell API integration checks. Automated unit/integration test coverage and concurrent posting stress tests have not been confirmed.
+ 
 ## Tenant isolation note
 CompanyId is currently supplied explicitly in the route for early development and testing. It is a scoping parameter, not proof of identity or authorization. Production requests must derive the tenant from a trusted authenticated server-side context.
 
@@ -161,18 +201,18 @@ git remote -v
 - Company membership, roles, and permissions are not implemented.
 - Trusted server-side tenant resolution is pending.
 - Duplicate-SKU race-condition exception handling is pending.
-- Stock transfer service/controller and transfer API operations are not yet implemented.
-- Stock posting uses transactions and row-version concurrency, but automatic retry behavior for concurrency conflicts is not implemented.
+- Stock posting and transfer posting use transactions and row-version concurrency, but automatic retry behavior for concurrency conflicts is not implemented. Concurrent posting stress tests remain outstanding.
 - Stock operations currently accept CompanyId from the route; trusted tenant resolution and authorization remain pending.
 - Automated unit/integration tests have not been confirmed.
 
 ## Next backend tasks
-1. Implement Stock Transfer DTOs, service interface/implementation, and controller using the existing StockTransfer/StockTransferItem models and DbContext constraints.
-2. Implement atomic multi-item transfer posting: validate source/destination warehouses and available balances; update both warehouse balances; create paired TransferOut/TransferIn movements; transition Draft to Posted exactly once.
-3. Add transfer cancellation rules (Draft only unless a deliberate reversal workflow is designed) and verify duplicate-post protection under repeated/concurrent requests.
-4. Create a second active warehouse and run manual API tests for single-item and multi-item transfers, insufficient source stock, same-warehouse rejection, and repeated posting.
-5. Design Authentication, Platform Admin, company membership, Main Moderator, roles, permissions, and trusted server-side tenant resolution.
-6. Add automated unit/integration tests, consistent error handling, and authorization.
+1. Implement Authentication with JWT, including secure password hashing and login/token issuance.
+2. Implement Platform Admin identity and company user management.
+3. Implement Company Moderator and Employee membership and role assignment.
+4. Implement authorization policies and trusted server-side tenant resolution; stop treating CompanyId from the route as proof of tenant identity.
+5. Add automated unit/integration tests for company, warehouse, product, stock, and stock transfer workflows.
+6. Review concurrency edge cases, consistent API error handling, and security before frontend integration.
+7. Prepare localization-ready API validation/error responses where needed; keep user-facing Arabic/English presentation and RTL layout in the frontend.
 
 ## Next-session instruction
-Inspect the actual repository and working-tree state first. Company, Warehouse, Product, and Stock Management have been implemented; Warehouse activation and the Stock In/Out/Adjustment/movement-query flows have passed manual PowerShell API checks. The latest Stock Management changes were built and pushed by the user. Next, implement Stock Transfer Management using the existing StockTransfer and StockTransferItem models and configured composite relationships. Do not create the second test warehouse until beginning transfer testing. Preserve atomic multi-item posting, positive movement quantities with direction represented by MovementType, non-negative stock, and protection against duplicate posting. Authentication, trusted tenant resolution, and automated tests remain outstanding.
+Inspect the actual repository and working-tree state first. Company, Warehouse, Product, Stock, and Stock Transfer Management have been implemented. Stock Transfer manual PowerShell checks confirmed Draft creation without stock changes, successful posting with paired movements, repeated-post rejection (409), insufficient-stock rejection, Draft cancellation, and unchanged balances after failed posting. The user reported committing the main application project; verify the commit and remote state rather than assuming a particular commit hash. Next, implement Authentication with JWT, Platform Admin/company user management, Company Moderator and Employee roles, authorization, and trusted server-side tenant resolution. Automated tests and concurrency stress testing remain outstanding. The frontend is planned to be Arabic-first; backend data storage already supports Unicode, while localization-ready validation/error responses should be addressed consistently without duplicating translated fields in domain models.
