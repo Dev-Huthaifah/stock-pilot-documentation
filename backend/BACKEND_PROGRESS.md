@@ -162,6 +162,78 @@ Posting uses a database transaction and a conditional Draft-to-Posted update to 
 
 These are manual PowerShell API integration checks. Automated unit/integration test coverage and concurrent posting stress tests have not been confirmed.
  
+
+### Authentication and identity (implemented)
+
+Files verified in the application repository:
+- `Models/ApplicationUser.cs`
+- `Models/CompanyMembership.cs`
+- `Models/CompanyRolePermission.cs`
+- `Models/CompanyUserPermissionOverride.cs`
+- `Models/Permission.cs`
+- `Enums/CompanyRule.cs` (declares `CompanyRole`)
+- `Data/StockPilotDbContext.cs`
+- `Data/Seeding/PlatformAdminBootstrapper.cs`
+- `Data/Seeding/PermissionSeeder.cs`
+- `Security/PermissionCatalog.cs`
+- `Services/Implementations/AuthService.cs`
+- `Services/Implementations/TokenService.cs`
+- `Services/Implementations/PermissionService.cs`
+- `Services/Implementations/PlatformCompanyService.cs`
+- `Controllers/AuthController.cs`
+- `Controllers/PlatformCompaniesController.cs`
+
+Identity:
+- `ApplicationUser` extends `IdentityUser<Guid>` and adds `FullName`, `IsActive`, `CreatedAt`, and `MustChangePassword`.
+- Identity uses EF Core stores and Guid keys. Email uniqueness is enabled.
+- Password policy: at least 10 characters, uppercase, lowercase, digit, and non-alphanumeric character.
+- Lockout is enabled after 5 failed attempts for 15 minutes. Email confirmation is not required in the current development configuration.
+- `PlatformAdminBootstrapper` creates the `PlatformAdmin` Identity role and optionally bootstraps the first platform admin from configuration keys `PlatformAdmin:Email`, `PlatformAdmin:Password`, and `PlatformAdmin:FullName`. Keep these values in User Secrets locally and a production secret store later.
+
+JWT:
+- JWT Bearer validates issuer, audience, signing key, and token lifetime; inbound claim mapping is disabled.
+- Configuration keys: `Jwt:Secret` (Base64-encoded key, minimum 32 bytes), `Jwt:Issuer`, `Jwt:Audience`, and `Jwt:ExpirationMinutes`.
+- Company-user JWT includes `sub`, `jti`, `membership_id`, optional email, and optional `warehouse_id`.
+- Platform Admin JWT includes `sub`, `jti`, `role=PlatformAdmin`, and `account_type=platform_admin`.
+- `PlatformAdminOnly` requires an authenticated principal with the `PlatformAdmin` role.
+- Temporary-password challenge JWT includes `token_use=password_change`, expires after five minutes, and is rejected by JWT bearer validation on routes other than `/api/auth/change-temporary-password`. The controller also rejects normal JWTs at that endpoint.
+
+Authentication endpoints:
+- `POST /api/auth/login` — accepts email/password. Returns `accessToken`, `tokenType`, `expiresAt`, and `requiresPasswordChange`.
+- `POST /api/auth/change-temporary-password` — requires the challenge JWT and `currentPassword` + `newPassword`; on success clears `MustChangePassword` and returns a normal JWT.
+- Inactive users, missing/inactive memberships, inactive companies, and inactive assigned warehouses are rejected during company-user login and temporary-password change.
+- Platform Admin login currently issues a normal platform token and does not use the company-user temporary-password branch.
+
+Company provisioning:
+- `POST /api/platform/company-provisioning` — PlatformAdminOnly; creates a company and initial `CompanyModerator` in a database transaction. Generates a 24-character temporary password and sets `MustChangePassword=true`. The response contains the temporary password once.
+- `POST /api/platform/company-provisioning/{companyId}/admin` — PlatformAdminOnly; creates a moderator for an existing active company if it has no active `CompanyModerator`. It rejects unknown/inactive companies, duplicate email, or an existing active moderator.
+- Both operations create a company membership with `CompanyModerator`, no assigned warehouse, and active status.
+
+Membership and permissions:
+- Roles: `CompanyModerator=1`, `WarehouseModerator=2`, `WarehouseEmployee=3`.
+- A unique index on `CompanyMembership.UserId` currently allows one company membership per user.
+- Check constraint: CompanyModerator must have no WarehouseId; WarehouseModerator and WarehouseEmployee must have one.
+- The 18-code permission catalog is seeded idempotently by `PermissionSeeder`.
+- `PermissionService` verifies active user/membership/company and assigned warehouse, then checks active permission, user override, and company-role grant in that order; default is deny.
+- **Not yet implemented:** default `CompanyRolePermission` grants for new companies. Permission evaluation is implemented and has 17 passing unit tests reported earlier, but inventory controllers do not yet consistently call the permission service.
+
+Manual authentication verification (PowerShell, local API):
+- Platform Admin login returned Bearer JWT with `RequiresPasswordChange=false`.
+- Newly provisioned company moderator login with temporary password returned `RequiresPasswordChange=true`.
+- Challenge JWT used against `GET /api/platform/companies` returned `401 Unauthorized`.
+- Temporary-password change succeeded and returned a normal JWT with `RequiresPasswordChange=false`.
+- A fresh login with the new password succeeded and returned `RequiresPasswordChange=false`.
+- Company-user JWT used against `GET /api/platform/companies` returned `403 Forbidden`.
+- The user reported successful `dotnet build StockPilot.slnx` during this work. Re-run current build and test suite before the next milestone; do not infer a fresh test result from the manual HTTP checks.
+
+### Current authorization gaps — critical
+
+- `CompaniesController` is protected by `PlatformAdminOnly`, and `PlatformCompaniesController` is protected by the same policy.
+- The current `POST /api/platform/companies` action still creates a company through the older `ICompanyService` path without creating an initial moderator. Remove or disable this legacy create action; use `POST /api/platform/company-provisioning` for provisioning.
+- `WarehousesController`, `ProductsController`, `StockController`, and `StockTransfersController` currently have no controller-level `[Authorize]` attribute and do not visibly call `IPermissionService`. These routes must not be treated as protected.
+- CompanyId is still supplied in tenant API routes. Derive and validate tenant context from the authenticated membership before production use; warehouse-scoped users must be restricted to their assigned warehouse.
+- Do not expose the inventory API publicly until endpoint authorization, permission checks, and cross-tenant tests are complete.
+
 ## Tenant isolation note
 CompanyId is currently supplied explicitly in the route for early development and testing. It is a scoping parameter, not proof of identity or authorization. Production requests must derive the tenant from a trusted authenticated server-side context.
 
@@ -196,9 +268,9 @@ git remote -v
 
 ## Known unfinished work / limitations
 - Company, warehouse, and product endpoints are not yet protected by authentication/authorization; do not expose publicly in production.
-- Platform Admin identity/authorization is not implemented.
-- Main Moderator invitation/account setup is not implemented.
-- Company membership, roles, and permissions are not implemented.
+- Platform Admin Identity role, JWT authentication, company memberships, roles, permission catalog, and permission evaluation are implemented.
+- Company moderator provisioning and temporary-password onboarding are implemented; email/invitation delivery is not implemented.
+- Default company-role permission grants and endpoint-level permission enforcement are pending.
 - Trusted server-side tenant resolution is pending.
 - Duplicate-SKU race-condition exception handling is pending.
 - Stock posting and transfer posting use transactions and row-version concurrency, but automatic retry behavior for concurrency conflicts is not implemented. Concurrent posting stress tests remain outstanding.
@@ -206,13 +278,14 @@ git remote -v
 - Automated unit/integration tests have not been confirmed.
 
 ## Next backend tasks
-1. Implement Authentication with JWT, including secure password hashing and login/token issuance.
-2. Implement Platform Admin identity and company user management.
-3. Implement Company Moderator and Employee membership and role assignment.
-4. Implement authorization policies and trusted server-side tenant resolution; stop treating CompanyId from the route as proof of tenant identity.
-5. Add automated unit/integration tests for company, warehouse, product, stock, and stock transfer workflows.
-6. Review concurrency edge cases, consistent API error handling, and security before frontend integration.
-7. Prepare localization-ready API validation/error responses where needed; keep user-facing Arabic/English presentation and RTL layout in the frontend.
+1. Add an idempotent seeder for default CompanyRolePermission grants; define least-privilege grants for CompanyModerator, WarehouseModerator, and WarehouseEmployee.
+2. Remove or disable the legacy POST /api/platform/companies action so all new company creation provisions an initial CompanyModerator.
+3. Protect WarehousesController, ProductsController, StockController, and StockTransfersController with authentication and per-operation IPermissionService checks.
+4. Derive tenant identity from authenticated membership and enforce assigned-warehouse scope; never trust route CompanyId as authorization.
+5. Add automated auth/provisioning integration tests, challenge-token expiry/replay tests, endpoint authorization tests, and cross-tenant isolation tests.
+6. Add employee provisioning, membership lifecycle, role management, and permission-override management endpoints.
+7. Review concurrency edge cases, consistent API error handling, audit logging, and security before frontend integration.
+8. Prepare localization-ready API validation/error responses where needed; keep user-facing Arabic/English presentation and RTL layout in the frontend.
 
 ## Next-session instruction
-Inspect the actual repository and working-tree state first. Company, Warehouse, Product, Stock, and Stock Transfer Management have been implemented. Stock Transfer manual PowerShell checks confirmed Draft creation without stock changes, successful posting with paired movements, repeated-post rejection (409), insufficient-stock rejection, Draft cancellation, and unchanged balances after failed posting. The user reported committing the main application project; verify the commit and remote state rather than assuming a particular commit hash. Next, implement Authentication with JWT, Platform Admin/company user management, Company Moderator and Employee roles, authorization, and trusted server-side tenant resolution. Automated tests and concurrency stress testing remain outstanding. The frontend is planned to be Arabic-first; backend data storage already supports Unicode, while localization-ready validation/error responses should be addressed consistently without duplicating translated fields in domain models.
+Inspect the actual repository and working-tree state first. Company, Warehouse, Product, Stock, and Stock Transfer Management have been implemented. Stock Transfer manual PowerShell checks confirmed Draft creation without stock changes, successful posting with paired movements, repeated-post rejection (409), insufficient-stock rejection, Draft cancellation, and unchanged balances after failed posting. The user reported committing the main application project; verify the commit and remote state rather than assuming a particular commit hash. Authentication, JWT, Platform Admin bootstrap, company moderator provisioning, temporary-password onboarding, company membership, permission catalog, and permission evaluation now exist. Next, seed default company-role permissions, remove the legacy company-creation path, enforce permissions on all tenant-owned controllers, and derive tenant/warehouse scope from authenticated membership. Automated auth/integration and tenant-isolation tests remain outstanding. The frontend is planned to be Arabic-first; backend data storage already supports Unicode, while localization-ready validation/error responses should be addressed consistently without duplicating translated fields in domain models.
