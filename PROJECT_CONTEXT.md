@@ -11,7 +11,7 @@ Stock Pilot is a web-based inventory and product management system for shops, wh
 - Company users access only the resources their permissions allow.
 - A company must never access another company's data.
 
-Authentication provider, invitation mechanism, exact role model, tenant-resolution mechanism, subscription billing, and custom domains are not finalized.
+Authentication is now implemented with ASP.NET Core Identity and JWT. Platform Admin accounts are bootstrapped from configuration secrets; company administrators are provisioned with generated temporary passwords and must change them at first login. The current company roles are CompanyModerator, WarehouseModerator, and WarehouseEmployee. The permission catalog and permission-evaluation service exist. Trusted tenant resolution and complete endpoint-level authorization are still unfinished; subscription billing and custom domains remain undecided.
 
 ## Planned capabilities
 Company management, users and roles, warehouses, products, stored stock balances, stock movements, multi-item transfers, reporting, and later AI-assisted workflows.
