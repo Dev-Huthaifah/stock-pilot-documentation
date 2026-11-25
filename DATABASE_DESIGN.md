@@ -9,7 +9,7 @@
 - StockTransfer
 - StockTransferItem
 
-Enums: `StockMovementType`, `StockTransferStatus`.
+Enums: `StockMovementType`, `StockTransferStatus`, and `CompanyRole`.
 
 ## Responsibilities
 | Entity | Purpose |
@@ -21,20 +21,58 @@ Enums: `StockMovementType`, `StockTransferStatus`.
 | StockMovement | Inventory movement history |
 | StockTransfer | Transfer header |
 | StockTransferItem | Product/quantity within a transfer |
+| ApplicationUser | ASP.NET Core Identity user |
+| CompanyMembership | User membership, company role, and optional warehouse assignment |
+| Permission | Global permission catalog entry |
+| CompanyRolePermission | Company-specific permission grant for a role |
+| CompanyUserPermissionOverride | Per-membership allow/deny override |
 
-`Company.Id` is `Guid`. The current model includes company ownership on tenant-owned records, composite company-scoped keys/foreign keys, unique company-scoped warehouse codes and product SKUs, non-negative stock and prices, positive transfer item quantities, and a constraint that source and destination warehouses differ.
+`Company.Id` is `Guid`. Tenant-owned records carry CompanyId. The model uses company-scoped composite keys/foreign keys, unique company-scoped warehouse codes and product SKUs, non-negative stock and prices, positive transfer item quantities, and a constraint that source and destination warehouses differ.
 
 ## Inventory decisions
 - Current balance is stored in ProductStock.
 - A transfer can contain multiple products.
 - Warehouse transfers are in the first version.
-- Transfers are posted directly on approval; no in-transit workflow is planned initially.
-- Transfer posting should create transfer-out and transfer-in movement records.
+- Transfers are created in Draft status and posted directly; no in-transit workflow is implemented.
+- Posting deducts source stock, adds destination stock, and creates paired TransferOut and TransferIn movement records.
+- StockMovement.Quantity is positive; MovementType identifies the direction.
 
 ## Enum values
 `StockMovementType`: StockIn=1, StockOut=2, AdjustmentIn=3, AdjustmentOut=4, TransferOut=5, TransferIn=6.
 
 `StockTransferStatus`: Draft=1, Posted=2, Cancelled=3.
+
+`CompanyRole`:
+- CompanyModerator=1
+- WarehouseModerator=2
+- WarehouseEmployee=3
+
+## Identity and membership constraints
+The DbContext derives from `IdentityDbContext<ApplicationUser, IdentityRole<Guid>, Guid>`. ApplicationUser extends IdentityUser with FullName, IsActive, CreatedAt, and MustChangePassword.
+
+A unique index on `CompanyMembership.UserId` currently limits each user to one company membership. A composite foreign key ensures an assigned warehouse belongs to the same company. A check constraint requires CompanyModerator to have no WarehouseId, while WarehouseModerator and WarehouseEmployee require one.
+
+Platform Admin is an ASP.NET Core Identity role (`PlatformAdmin`), not a CompanyMembership.
+
+## Permission catalog
+The global catalog contains 18 codes:
+- Products: `products.view`, `products.create`, `products.update`
+- Warehouses: `warehouses.view`, `warehouses.manage`
+- Stock: `stock.view`, `stock.in`, `stock.out`, `stock.adjust`
+- Transfers: `stock.transfer.view`, `stock.transfer.create`, `stock.transfer.post`, `stock.transfer.cancel`
+- Employees: `employees.view`, `employees.create`, `employees.manage`, `employees.permissions.manage`
+- Reports: `reports.view`
+
+## Default company-role grants
+`PermissionSeeder` inserts missing global catalog entries. `CompanyRolePermissionSeeder` grants role permissions for a company. It runs for all existing companies at application startup and is also called when a company or its initial moderator is provisioned. It checks for existing grants and inserts only missing entries; it does not delete or overwrite existing grants.
+
+| Role | Default grants | Scope |
+|---|---:|---|
+| CompanyModerator | 18 | All catalog permissions |
+| WarehouseModerator | 8 | Products/warehouses/stock view; stock in/out/adjust; transfer view/create |
+| WarehouseEmployee | 5 | Products/warehouses/stock view; stock in/out |
+
+The current seed set creates 31 role-permission grants per company. User-specific overrides are evaluated before role grants; an explicit allow or deny override takes precedence. If there is no override or role grant, permission evaluation denies access.
 
 ## Migrations
 Known migrations:
@@ -42,27 +80,3 @@ Known migrations:
 - `20261030214454_AddProductPriceConstraints`
 
 Both were reported applied to the local database. Verify actual migration history and current model before schema changes. This document is a summary; inspect entities, DbContext, migrations, and database history.
-
-
-## Identity, memberships, and permissions
-
-The DbContext derives from `IdentityDbContext<ApplicationUser, IdentityRole<Guid>, Guid>`. `ApplicationUser` extends IdentityUser with `FullName`, `IsActive`, `CreatedAt`, and `MustChangePassword`.
-
-Current identity and authorization entities:
-- `CompanyMembership`: links one user to one company, optional assigned warehouse, company role, active flag, and creation time.
-- `Permission`: global permission catalog entry with unique code, name, category, description, and active flag.
-- `CompanyRolePermission`: company-specific grant keyed by CompanyId + Role + PermissionId.
-- `CompanyUserPermissionOverride`: per-membership allow/deny override keyed by CompanyMembershipId + PermissionId.
-
-A unique index on `CompanyMembership.UserId` currently limits each user to one company membership. A composite foreign key ensures an assigned warehouse belongs to the same company. The membership check constraint requires `CompanyModerator` to have no WarehouseId, while `WarehouseModerator` and `WarehouseEmployee` require a WarehouseId.
-
-Company roles:
-- `CompanyModerator = 1`
-- `WarehouseModerator = 2`
-- `WarehouseEmployee = 3`
-
-The permission catalog currently defines 18 codes: `products.view/create/update`, `warehouses.view/manage`, `stock.view/in/out/adjust`, `stock.transfer.view/create/post/cancel`, `employees.view/create/manage/permissions.manage`, and `reports.view`.
-
-`PermissionSeeder` inserts missing catalog entries idempotently. It does not seed company-role grants. `PermissionService` applies user override first, then company-role grant, and defaults to deny. Default role grants, endpoint-level enforcement, and trusted tenant resolution remain unfinished.
-
-Platform Admin is represented by an ASP.NET Core Identity role (`PlatformAdmin`), not by a `CompanyMembership`.
