@@ -26,7 +26,7 @@ Files:
 - `Services/Implementations/CompanyService.cs`
 - `Controllers/CompaniesController.cs`
 
-Operations: create, get by ID, list, update, deactivate. Route base: `/api/platform/companies`. Company deactivation sets `IsActive=false`. The service is registered in Program.cs.
+Operations: get by ID, list, update, and deactivate. Route base: `/api/platform/companies`; these endpoints are protected by the `PlatformAdminOnly` policy. Company deactivation sets `IsActive=false`. New company creation uses `/api/platform/company-provisioning` so the initial CompanyModerator is provisioned in the same transaction. The service is registered in Program.cs.
 
 **Important:** `Company.Id` is `Guid`, not `int`. Use Guid consistently for company IDs.
 
@@ -215,7 +215,7 @@ Membership and permissions:
 - Check constraint: CompanyModerator must have no WarehouseId; WarehouseModerator and WarehouseEmployee must have one.
 - The 18-code permission catalog is seeded idempotently by `PermissionSeeder`.
 - `PermissionService` verifies active user/membership/company and assigned warehouse, then checks active permission, user override, and company-role grant in that order; default is deny.
-- **Not yet implemented:** default `CompanyRolePermission` grants for new companies. Permission evaluation is implemented and has 17 passing unit tests reported earlier, but inventory controllers do not yet consistently call the permission service.
+- Default company-role grants are implemented by `CompanyRolePermissionSeeder`: CompanyModerator receives all 18 catalog permissions, WarehouseModerator receives 8, and WarehouseEmployee receives 5. The seeder is idempotent, runs for existing companies at startup, and runs during company provisioning. Tenant inventory controllers now inherit `[Authorize]` from `CompanyAuthorizedController` and require operation-specific permissions. Warehouse-scoped users are restricted to their assigned warehouse for warehouse, stock, and transfer operations.
 
 Manual authentication verification (PowerShell, local API):
 - Platform Admin login returned Bearer JWT with `RequiresPasswordChange=false`.
@@ -226,13 +226,13 @@ Manual authentication verification (PowerShell, local API):
 - Company-user JWT used against `GET /api/platform/companies` returned `403 Forbidden`.
 - The user reported successful `dotnet build StockPilot.slnx` during this work. Re-run current build and test suite before the next milestone; do not infer a fresh test result from the manual HTTP checks.
 
-### Current authorization gaps — critical
+### Current authorization state and remaining security work
 
-- `CompaniesController` is protected by `PlatformAdminOnly`, and `PlatformCompaniesController` is protected by the same policy.
-- The current `POST /api/platform/companies` action still creates a company through the older `ICompanyService` path without creating an initial moderator. Remove or disable this legacy create action; use `POST /api/platform/company-provisioning` for provisioning.
-- `WarehousesController`, `ProductsController`, `StockController`, and `StockTransfersController` currently have no controller-level `[Authorize]` attribute and do not visibly call `IPermissionService`. These routes must not be treated as protected.
-- CompanyId is still supplied in tenant API routes. Derive and validate tenant context from the authenticated membership before production use; warehouse-scoped users must be restricted to their assigned warehouse.
-- Do not expose the inventory API publicly until endpoint authorization, permission checks, and cross-tenant tests are complete.
+- `CompaniesController` and `PlatformCompaniesController` require the `PlatformAdminOnly` policy. The legacy `POST /api/platform/companies` create action has been removed; company creation goes through `POST /api/platform/company-provisioning`, which provisions the initial CompanyModerator.
+- `ProductsController`, `WarehousesController`, `StockController`, and `StockTransfersController` inherit `[Authorize]` through `CompanyAuthorizedController` and perform operation-specific permission checks.
+- Warehouse-scoped users are restricted to their assigned warehouse for warehouse and stock operations. Transfer listing/details are filtered to transfers involving that warehouse; transfer creation requires the assigned warehouse to be one endpoint of the transfer. Posting and cancellation require their separate permission codes.
+- CompanyId remains an explicit route parameter. The permission service validates an active membership for the authenticated subject and requested company, but centralized trusted tenant-context resolution remains a future improvement.
+- Manual PowerShell tests covered role and cross-company boundaries. Automated HTTP/API authorization integration tests and a full security review remain outstanding. Do not treat the API as production-ready solely on the basis of the current unit tests.
 
 ## Tenant isolation note
 CompanyId is currently supplied explicitly in the route for early development and testing. It is a scoping parameter, not proof of identity or authorization. Production requests must derive the tenant from a trusted authenticated server-side context.
@@ -270,22 +270,20 @@ git remote -v
 - Company, warehouse, and product endpoints are not yet protected by authentication/authorization; do not expose publicly in production.
 - Platform Admin Identity role, JWT authentication, company memberships, roles, permission catalog, and permission evaluation are implemented.
 - Company moderator provisioning and temporary-password onboarding are implemented; email/invitation delivery is not implemented.
-- Default company-role permission grants and endpoint-level permission enforcement are pending.
-- Trusted server-side tenant resolution is pending.
+- Default company-role permission grants and endpoint-level permission enforcement are implemented for the current tenant controllers.
+- Centralized trusted server-side tenant-context resolution remains pending; CompanyId is still supplied in routes.
 - Duplicate-SKU race-condition exception handling is pending.
 - Stock posting and transfer posting use transactions and row-version concurrency, but automatic retry behavior for concurrency conflicts is not implemented. Concurrent posting stress tests remain outstanding.
 - Stock operations currently accept CompanyId from the route; trusted tenant resolution and authorization remain pending.
-- Automated unit/integration tests have not been confirmed.
+- The current automated suite has 27 passing tests (0 failed, 0 skipped) in the latest local `dotnet test .\\StockPilot.slnx` run. These are not comprehensive API integration/security tests.
 
 ## Next backend tasks
-1. Add an idempotent seeder for default CompanyRolePermission grants; define least-privilege grants for CompanyModerator, WarehouseModerator, and WarehouseEmployee.
-2. Remove or disable the legacy POST /api/platform/companies action so all new company creation provisions an initial CompanyModerator.
-3. Protect WarehousesController, ProductsController, StockController, and StockTransfersController with authentication and per-operation IPermissionService checks.
-4. Derive tenant identity from authenticated membership and enforce assigned-warehouse scope; never trust route CompanyId as authorization.
-5. Add automated auth/provisioning integration tests, challenge-token expiry/replay tests, endpoint authorization tests, and cross-tenant isolation tests.
-6. Add employee provisioning, membership lifecycle, role management, and permission-override management endpoints.
-7. Review concurrency edge cases, consistent API error handling, audit logging, and security before frontend integration.
-8. Prepare localization-ready API validation/error responses where needed; keep user-facing Arabic/English presentation and RTL layout in the frontend.
+1. Add automated HTTP/API authorization and cross-company integration tests for every tenant-owned endpoint.
+2. Add provisioning integration tests, challenge-token expiry/replay tests, and SQL Server-backed migration/transaction/concurrency tests.
+3. Implement employee provisioning, membership lifecycle, role management, and permission-override management endpoints.
+4. Decide whether to replace route-supplied CompanyId with a centrally resolved trusted tenant context.
+5. Review transfer/stock concurrency edge cases, retry strategy, consistent API errors, audit logging, and security before production.
+6. Prepare localization-ready API validation/error responses; keep user-facing Arabic/English presentation and RTL layout in the frontend.
 
 ## Next-session instruction
 Inspect the actual repository and working-tree state first. Company, Warehouse, Product, Stock, and Stock Transfer Management have been implemented. Stock Transfer manual PowerShell checks confirmed Draft creation without stock changes, successful posting with paired movements, repeated-post rejection (409), insufficient-stock rejection, Draft cancellation, and unchanged balances after failed posting. The user reported committing the main application project; verify the commit and remote state rather than assuming a particular commit hash. Authentication, JWT, Platform Admin bootstrap, company moderator provisioning, temporary-password onboarding, company membership, permission catalog, and permission evaluation now exist. Next, seed default company-role permissions, remove the legacy company-creation path, enforce permissions on all tenant-owned controllers, and derive tenant/warehouse scope from authenticated membership. Automated auth/integration and tenant-isolation tests remain outstanding. The frontend is planned to be Arabic-first; backend data storage already supports Unicode, while localization-ready validation/error responses should be addressed consistently without duplicating translated fields in domain models.
