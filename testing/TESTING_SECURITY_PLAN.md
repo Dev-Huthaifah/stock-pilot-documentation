@@ -1,36 +1,51 @@
 # Testing and Security Plan
 
-**Status:** A successful backend build has been reported; a complete automated test suite and security review are not confirmed.
+## Latest automated test result
+The latest local run of `dotnet test .\StockPilot.slnx` completed successfully:
+- Total: 27
+- Passed: 27
+- Failed: 0
+- Skipped: 0
 
-## Testing
-- Unit tests for service rules, validation, stock calculations, transfer rules, and permission evaluation.
-- Integration tests for endpoints, EF persistence, migrations, transactions, and concurrency.
-- Multi-tenant tests: Company A cannot read, update, deactivate, or reference Company B's resources; client-supplied CompanyId cannot change tenant identity.
-- Inventory invariants: no unintended negative stock, no partial transfer posting, no duplicate posting, valid source/destination, and consistent balances/movements.
+The current automated suite includes permission-service tests and company-role permission seeder tests using EF Core InMemory. This is unit-level coverage; it is not a substitute for HTTP/API integration tests against SQL Server.
+
+## Manual authorization verification
+The following endpoint checks were performed locally with PowerShell and JWTs:
+
+### Warehouse scope
+- CompanyModerator could list all company warehouses.
+- WarehouseModerator could list only the assigned Main Warehouse.
+- WarehouseEmployee could list only the assigned Secondary Warehouse.
+- Warehouse-scoped users were denied access to stock in another warehouse.
+- WarehouseEmployee could not adjust stock (403), create transfers (403), list transfers (403), or create/update/deactivate products (403).
+- WarehouseEmployee could record stock-in and stock-out operations in the assigned warehouse.
+- WarehouseModerator could adjust stock and create a transfer involving the assigned warehouse.
+- WarehouseModerator could not post or cancel a transfer (403).
+- WarehouseModerator could not manage warehouses (create/update/deactivate); those operations returned 403.
+
+### Company boundary
+Cross-company product, warehouse, stock, stock-movement, and transfer requests were rejected with 403 in the tested scenarios, including attempts to use a different company's CompanyId.
+
+### CompanyModerator operations
+CompanyModerator successfully created, updated, and deactivated products, and created, updated, deactivated, and reactivated warehouses in its company.
+
+These are manual checks, not automated integration tests. They demonstrate the tested scenarios only and do not constitute a complete security review.
+
+## Automated test priorities
+- HTTP/API authorization tests for unauthenticated requests and each role/permission combination.
+- Cross-company isolation tests for every tenant-owned endpoint and resource.
+- Warehouse-scope tests for list, get-by-ID, stock operations, movements, and transfers.
+- Platform Admin policy tests, provisioning transaction tests, and temporary-password challenge-token expiry/replay tests.
+- SQL Server integration tests for migrations, constraints, transactions, row-version concurrency, and concurrent first stock inserts.
+- Transfer posting concurrency/stress tests and rollback verification.
+- Regression tests for inactive users, memberships, companies, warehouses, and permissions.
 
 ## Production security requirements
-Authentication and authorization; separate Platform Admin and company roles; trusted server-side tenant resolution; input validation; safe error responses; rate limiting as appropriate; secret management; HTTPS; audit important administrative/inventory operations; backup and restore testing; dependency review.
+- Keep JWT signing keys and Platform Admin bootstrap credentials in a secret store; never commit them.
+- Require HTTPS in production and configure secure deployment defaults.
+- Review rate limiting, safe error responses, audit logging for administrative and inventory operations, backup/restore, and dependency vulnerabilities.
+- Keep CompanyId membership validation and assigned-warehouse checks on every tenant-owned operation. CompanyId in a route is a selector, not authorization.
+- Review whether centralized tenant-context resolution should replace route-only tenant selection.
+- Complete a security review before exposing the API publicly.
 
 A feature is not done merely because it compiles. It needs relevant tests, tenant-boundary checks, error handling, and documentation.
-
-
-## Implemented authentication behavior and manual verification
-
-The following behavior has been implemented and manually verified through PowerShell against the local API:
-- Platform Admin login returns a normal Bearer JWT with `RequiresPasswordChange=false`.
-- Company Admin login with a generated temporary password returns `RequiresPasswordChange=true` and a five-minute challenge token.
-- The challenge token receives `401 Unauthorized` when used against `GET /api/platform/companies`.
-- After successful temporary-password change, the endpoint returns a normal JWT with `RequiresPasswordChange=false`.
-- A fresh login with the new password succeeds and returns `RequiresPasswordChange=false`.
-- A company-user JWT receives `403 Forbidden` from the Platform Admin-only companies endpoint.
-- The user reported successful `dotnet build StockPilot.slnx` and a successful test run earlier in the authentication workstream. The permission-service suite previously reported 17 passing tests; re-run the current suite before relying on that count.
-
-## Remaining security gaps (do not treat as production-ready)
-
-- Warehouse, product, stock, and stock-transfer controllers do not yet consistently require authentication or call `IPermissionService`.
-- The permission catalog is seeded, but company-role default grants are not seeded.
-- Route-supplied CompanyId remains a scoping input; trusted tenant context must be derived from authenticated membership.
-- The legacy `POST /api/platform/companies` action still creates a company through `ICompanyService` without provisioning its initial CompanyModerator. Prefer the company-provisioning route and remove or disable the legacy create action before production.
-- Platform Admin accounts currently bypass the company-user temporary-password branch in `AuthService.LoginAsync`; define a separate platform-admin password rotation policy if required.
-- Challenge tokens are short-lived and endpoint-restricted; automated integration tests should cover expiry, replay after successful password change, wrong current password, inactive user/company/membership/warehouse, and token use on all protected route groups.
-- No comprehensive API authorization, tenant-isolation, or production security review has been completed.
